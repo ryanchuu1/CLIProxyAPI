@@ -72,6 +72,9 @@ func validateResponsesNamespaceTool(seenNames map[string]struct{}, tool gjson.Re
 	if !children.Exists() || !children.IsArray() {
 		return fmt.Errorf("namespace tool %q must contain a tools array", namespaceName)
 	}
+	if len(children.Array()) == 0 {
+		return fmt.Errorf("namespace tool %q must contain at least one child tool", namespaceName)
+	}
 
 	childNames := map[string]struct{}{}
 	var validationErr error

@@ -71,6 +71,30 @@ func TestValidateOpenAIResponsesToolsForChatTranslation_FailsClosed(t *testing.T
 			raw:  `{"tools":[{"type":"namespace","name":"","tools":[{"type":"function","name":"lookup_value"}]}]}`,
 		},
 		{
+			name: "whitespace namespace name",
+			raw:  `{"tools":[{"type":"namespace","name":" ","tools":[{"type":"function","name":"lookup_value"}]}]}`,
+		},
+		{
+			name: "tab namespace name",
+			raw:  `{"tools":[{"type":"namespace","name":"\t","tools":[{"type":"function","name":"lookup_value"}]}]}`,
+		},
+		{
+			name: "newline namespace name",
+			raw:  `{"tools":[{"type":"namespace","name":"\n","tools":[{"type":"function","name":"lookup_value"}]}]}`,
+		},
+		{
+			name: "missing namespace name",
+			raw:  `{"tools":[{"type":"namespace","tools":[{"type":"function","name":"lookup_value"}]}]}`,
+		},
+		{
+			name: "null namespace name",
+			raw:  `{"tools":[{"type":"namespace","name":null,"tools":[{"type":"function","name":"lookup_value"}]}]}`,
+		},
+		{
+			name: "empty namespace tools",
+			raw:  `{"tools":[{"type":"namespace","name":"example_namespace","tools":[]}]}`,
+		},
+		{
 			name: "empty child name",
 			raw:  `{"tools":[{"type":"namespace","name":"example_namespace","tools":[{"type":"function","name":""}]}]}`,
 		},
