@@ -95,6 +95,12 @@ func hostCallbackPluginIDFromContext(ctx context.Context) string {
 	return strings.TrimSpace(pluginID)
 }
 
+// newBridgeOwnedContext creates a cancellable stream context.
+// The caller must cancel on failure or transfer cancel to a stream bridge.
+func newBridgeOwnedContext(parent context.Context) (context.Context, context.CancelFunc) {
+	return context.WithCancel(parent)
+}
+
 func (h *Host) callFromPlugin(ctx context.Context, method string, request []byte) ([]byte, error) {
 	switch method {
 	case pluginabi.MethodHostModelExecute:
@@ -161,7 +167,7 @@ func (h *Host) callHostHTTPDoStream(ctx context.Context, request []byte) ([]byte
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	streamCtx, cancel := context.WithCancel(ctx)
+	streamCtx, cancel := newBridgeOwnedContext(ctx)
 	resp, errDo := h.newHTTPClient(nil).DoStream(streamCtx, httpReq)
 	if errDo != nil {
 		cancel()
