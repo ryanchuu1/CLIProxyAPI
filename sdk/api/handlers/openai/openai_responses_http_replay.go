@@ -1,14 +1,12 @@
 package openai
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"strings"
 	"sync"
 	"time"
-
-	"github.com/tidwall/gjson"
-	"github.com/tidwall/sjson"
 )
 
 const (
@@ -32,8 +30,17 @@ var responsesHTTPReplayCache = responsesHTTPReplayStore{
 }
 
 func prepareResponsesHTTPReplay(rawJSON []byte) ([]byte, error) {
-	previousResponseID := strings.TrimSpace(gjson.GetBytes(rawJSON, "previous_response_id").String())
-	if previousResponseID == "" {
+	var request map[string]json.RawMessage
+	if err := json.Unmarshal(rawJSON, &request); err != nil {
+		return nil, err
+	}
+
+	previousRaw, ok := request["previous_response_id"]
+	if !ok {
+		return rawJSON, nil
+	}
+	var previousResponseID string
+	if err := json.Unmarshal(previousRaw, &previousResponseID); err != nil || strings.TrimSpace(previousResponseID) == "" {
 		return rawJSON, nil
 	}
 
@@ -41,8 +48,7 @@ func prepareResponsesHTTPReplay(rawJSON []byte) ([]byte, error) {
 	if !ok {
 		return rawJSON, nil
 	}
-
-	currentInput, errInput := responsesHTTPInputArray(rawJSON)
+	currentInput, errInput := responsesHTTPInputArrayRaw(request["input"])
 	if errInput != nil {
 		return nil, errInput
 	}
@@ -51,24 +57,20 @@ func prepareResponsesHTTPReplay(rawJSON []byte) ([]byte, error) {
 		return nil, errMerge
 	}
 
-	updated, errSet := sjson.SetRawBytes(rawJSON, "input", mergedInput)
-	if errSet != nil {
-		return nil, errSet
-	}
-	updated, errDelete := sjson.DeleteBytes(updated, "previous_response_id")
-	if errDelete != nil {
-		return nil, errDelete
-	}
-	return updated, nil
+	request["input"] = mergedInput
+	delete(request, "previous_response_id")
+	return json.Marshal(request)
 }
 
 func rememberResponsesHTTPReplay(requestJSON, responseJSON []byte) {
-	responseID := strings.TrimSpace(gjson.GetBytes(responseJSON, "id").String())
-	output := gjson.GetBytes(responseJSON, "output")
-	if responseID == "" || !output.Exists() || !output.IsArray() {
+	var response struct {
+		ID     string          `json:"id"`
+		Output json.RawMessage `json:"output"`
+	}
+	if err := json.Unmarshal(responseJSON, &response); err != nil || strings.TrimSpace(response.ID) == "" || len(response.Output) == 0 {
 		return
 	}
-	rememberResponsesHTTPReplayOutput(requestJSON, responseID, []byte(output.Raw))
+	rememberResponsesHTTPReplayOutput(requestJSON, response.ID, response.Output)
 }
 
 func rememberResponsesHTTPReplayOutput(requestJSON []byte, responseID string, outputJSON []byte) {
@@ -76,13 +78,8 @@ func rememberResponsesHTTPReplayOutput(requestJSON []byte, responseID string, ou
 	if responseID == "" {
 		return
 	}
-
 	requestInput, errInput := responsesHTTPInputArray(requestJSON)
 	if errInput != nil {
-		return
-	}
-	output := gjson.ParseBytes(outputJSON)
-	if !output.IsArray() {
 		return
 	}
 	mergedInput, errMerge := mergeResponsesHTTPJSONArrays(requestInput, outputJSON)
@@ -93,23 +90,34 @@ func rememberResponsesHTTPReplayOutput(requestJSON []byte, responseID string, ou
 }
 
 func responsesHTTPInputArray(rawJSON []byte) ([]byte, error) {
-	input := gjson.GetBytes(rawJSON, "input")
-	if !input.Exists() {
+	var request map[string]json.RawMessage
+	if err := json.Unmarshal(rawJSON, &request); err != nil {
+		return nil, err
+	}
+	return responsesHTTPInputArrayRaw(request["input"])
+}
+
+func responsesHTTPInputArrayRaw(input json.RawMessage) ([]byte, error) {
+	input = bytes.TrimSpace(input)
+	if len(input) == 0 || bytes.Equal(input, []byte("null")) {
 		return []byte("[]"), nil
 	}
-	if input.IsArray() {
-		return []byte(input.Raw), nil
-	}
-	if input.Type != gjson.String {
-		return nil, fmt.Errorf("responses input must be a string or array")
+
+	var items []json.RawMessage
+	if err := json.Unmarshal(input, &items); err == nil {
+		return json.Marshal(items)
 	}
 
+	var text string
+	if err := json.Unmarshal(input, &text); err != nil {
+		return nil, fmt.Errorf("responses input must be a string or array")
+	}
 	item := map[string]any{
 		"role": "user",
 		"content": []map[string]any{
 			{
 				"type": "input_text",
-				"text": input.String(),
+				"text": text,
 			},
 		},
 	}
@@ -163,19 +171,13 @@ func (s *responsesHTTPReplayStore) put(responseID string, input []byte) {
 			delete(s.entries, id)
 		}
 	}
-
 	if _, exists := s.entries[responseID]; !exists {
 		s.order = append(s.order, responseID)
 	}
-	for len(s.entries) >= responsesHTTPReplayMaxEntries {
-		if len(s.order) == 0 {
-			break
-		}
+	for len(s.entries) >= responsesHTTPReplayMaxEntries && len(s.order) > 0 {
 		oldest := s.order[0]
 		s.order = s.order[1:]
-		if _, exists := s.entries[oldest]; exists {
-			delete(s.entries, oldest)
-		}
+		delete(s.entries, oldest)
 	}
 
 	s.entries[responseID] = responsesHTTPReplayEntry{
