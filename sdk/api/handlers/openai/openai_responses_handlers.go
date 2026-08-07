@@ -51,6 +51,8 @@ type responsesSSEFramer struct {
 	outputItems          map[int][]byte
 	outputOrder          []int
 	unindexedOutputItems [][]byte
+	completedResponseID  string
+	completedOutput      []byte
 }
 
 func (f *responsesSSEFramer) WriteChunk(w io.Writer, chunk []byte) {
@@ -112,6 +114,11 @@ func (f *responsesSSEFramer) repairFrame(frame []byte) []byte {
 		f.recordOutputItem(payload)
 	case "response.completed":
 		repaired := f.repairCompletedPayload(payload)
+		f.completedResponseID = gjson.GetBytes(repaired, "response.id").String()
+		output := gjson.GetBytes(repaired, "response.output")
+		if output.Exists() && output.IsArray() {
+			f.completedOutput = append([]byte(nil), output.Raw...)
+		}
 		if !bytes.Equal(repaired, payload) {
 			return responsesSSEFrameWithData(frame, repaired)
 		}
@@ -401,6 +408,17 @@ func (h *OpenAIResponsesAPIHandler) Responses(c *gin.Context) {
 		return
 	}
 
+	rawJSON, err = prepareResponsesHTTPReplay(rawJSON)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, handlers.ErrorResponse{
+			Error: handlers.ErrorDetail{
+				Message: fmt.Sprintf("Invalid request: %v", err),
+				Type:    "invalid_request_error",
+			},
+		})
+		return
+	}
+
 	// Check if the client requested a streaming response.
 	streamResult := gjson.GetBytes(rawJSON, "stream")
 	if streamResult.Type == gjson.True {
@@ -476,6 +494,7 @@ func (h *OpenAIResponsesAPIHandler) handleNonStreamingResponse(c *gin.Context, r
 		cliCancel(errMsg.Error)
 		return
 	}
+	rememberResponsesHTTPReplay(rawJSON, resp)
 	handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
 	_, _ = c.Writer.Write(resp)
 	cliCancel()
@@ -555,6 +574,7 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJ
 
 			// Continue
 			h.forwardResponsesStream(c, flusher, func(err error) { cliCancel(err) }, dataChan, errChan, framer)
+			rememberResponsesHTTPReplayOutput(rawJSON, framer.completedResponseID, framer.completedOutput)
 			return
 		}
 	}
