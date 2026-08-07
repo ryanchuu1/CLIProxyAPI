@@ -13,12 +13,9 @@ func TestResponsesHTTPReplayContinuation(t *testing.T) {
 
 	firstRequest := []byte(`{"model":"gpt-test","input":"Remember blue","stream":false}`)
 	firstResponse := []byte(`{"id":"resp_1","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"blue"}]}]}`)
-	firstRequest = bytes.ReplaceAll(firstRequest, []byte(`\"`), []byte(`"`))
-	firstResponse = bytes.ReplaceAll(firstResponse, []byte(`\"`), []byte(`"`))
 	rememberResponsesHTTPReplay(firstRequest, firstResponse)
 
 	secondRequest := []byte(`{"model":"gpt-test","previous_response_id":"resp_1","input":"What color?","stream":false}`)
-	secondRequest = bytes.ReplaceAll(secondRequest, []byte(`\"`), []byte(`"`))
 	replayed, errReplay := prepareResponsesHTTPReplay(secondRequest)
 	if errReplay != nil {
 		t.Fatalf("prepare replay: %v", errReplay)
@@ -41,10 +38,8 @@ func TestResponsesHTTPReplayContinuation(t *testing.T) {
 	}
 
 	secondResponse := []byte(`{"id":"resp_2","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Blue"}]}]}`)
-	secondResponse = bytes.ReplaceAll(secondResponse, []byte(`\"`), []byte(`"`))
 	rememberResponsesHTTPReplay(replayed, secondResponse)
 	thirdRequest := []byte(`{"model":"gpt-test","previous_response_id":"resp_2","input":"Repeat it","stream":false}`)
-	thirdRequest = bytes.ReplaceAll(thirdRequest, []byte(`\"`), []byte(`"`))
 	thirdReplay, errThird := prepareResponsesHTTPReplay(thirdRequest)
 	if errThird != nil {
 		t.Fatalf("prepare third-turn replay: %v", errThird)
@@ -59,7 +54,6 @@ func TestResponsesHTTPReplayUnknownIDPreservesRequest(t *testing.T) {
 	t.Cleanup(resetResponsesHTTPReplayCacheForTest)
 
 	raw := []byte(`{"model":"gpt-test","previous_response_id":"resp_missing","input":"hello"}`)
-	raw = bytes.ReplaceAll(raw, []byte(`\"`), []byte(`"`))
 	got, errPrepare := prepareResponsesHTTPReplay(raw)
 	if errPrepare != nil {
 		t.Fatalf("prepare replay: %v", errPrepare)
