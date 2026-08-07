@@ -7,21 +7,108 @@ permissions:
   contents: read
 
 jobs:
-  test:
-    runs-on: ubuntu-latest
+  validate-arm64:
+    runs-on: ubuntu-24.04-arm
     steps:
-      - name: Checkout
+      - name: Checkout validation workflow
         uses: actions/checkout@v4
-      - name: Refresh models catalog
+
+      - name: Build exact candidate twice
+        env:
+          SOURCE_COMMIT: 3724d69be6518efdbf5a09fa99fa65c2a2df2bb9
+          CAPTURED_COMMIT: c0fb67b99d48dc4866621d8902d983cc5160ba42
+          GO_SUM_SHA256: d1eb18ed84c2fe240c0e97a174b398d62f08693b3f900f6ed0c87a5629775d5f
+          GO_VERSION: 1.26.0
+          GO_ARCHIVE_SHA256: bd03b743eb6eb4193ea3c3fd3956546bf0e3ca5b7076c8226334afe6b75704cd
         run: |
-          git fetch --depth 1 https://github.com/router-for-me/models.git main
-          git show FETCH_HEAD:models.json > internal/registry/models/models.json
-      - name: Set up Go
-        uses: actions/setup-go@v5
+          set -euo pipefail
+          test "$(uname -m)" = "aarch64"
+          test "$(gcc -dumpfullversion)" = "13.3.0"
+
+          GO_ARCHIVE="go${GO_VERSION}.linux-arm64.tar.gz"
+          python3 - "https://go.dev/dl/${GO_ARCHIVE}" "/tmp/${GO_ARCHIVE}" <<'PY'
+          import sys, urllib.request
+          url, destination = sys.argv[1:]
+          with urllib.request.urlopen(url, timeout=120) as response, open(destination, "wb") as handle:
+              while chunk := response.read(1024 * 1024):
+                  handle.write(chunk)
+          PY
+          printf '%s  %s\n' "$GO_ARCHIVE_SHA256" "/tmp/${GO_ARCHIVE}" | sha256sum -c -
+          mkdir -p /tmp/go-toolchain
+          tar -C /tmp/go-toolchain -xzf "/tmp/${GO_ARCHIVE}"
+          test "$(/tmp/go-toolchain/go/bin/go version)" = "go version go${GO_VERSION} linux/arm64"
+
+          for run in 1 2; do
+            src="/tmp/cpa-source-${run}"
+            out="/tmp/cpa-output-${run}"
+            cache="/tmp/cpa-cache-${run}"
+            git clone --no-checkout https://github.com/ryanchuu1/CLIProxyAPI.git "$src"
+            git -C "$src" checkout --detach "$SOURCE_COMMIT"
+            test "$(git -C "$src" rev-parse HEAD)" = "$SOURCE_COMMIT"
+            git -C "$src" merge-base --is-ancestor "$CAPTURED_COMMIT" "$SOURCE_COMMIT"
+            test -z "$(git -C "$src" status --porcelain --untracked-files=all)"
+            printf '%s  %s\n' "$GO_SUM_SHA256" "$src/go.sum" | sha256sum -c -
+
+            mkdir -p "$out/cpa" "$cache/gopath" "$cache/gomod" "$cache/gocache"
+            chmod 0775 "$out/cpa"
+            export PATH="/tmp/go-toolchain/go/bin:/usr/bin:/bin"
+            export GOTOOLCHAIN=local GOPATH="$cache/gopath" GOMODCACHE="$cache/gomod" GOCACHE="$cache/gocache"
+            export GOFLAGS="-mod=readonly" CGO_ENABLED=1 GOOS=linux GOARCH=arm64 SOURCE_DATE_EPOCH=0
+
+            if [ "$run" = 1 ]; then
+              (cd "$src" && go test ./...)
+              (cd "$src" && go vet ./...)
+            fi
+
+            (
+              cd "$src"
+              go build -mod=readonly -trimpath -buildvcs=false \
+                -ldflags="-buildid= -s -w -X main.Version=canonical-build-v1 -X main.Commit=$SOURCE_COMMIT -X main.BuildDate=1970-01-01T00:00:00Z" \
+                -o "$out/cpa/cli-proxy-api" ./cmd/server/
+            )
+            chmod 0755 "$out/cpa/cli-proxy-api"
+
+            python3 - "$out/cpa/cli-proxy-api" "$out/cpa-inventory.json" <<'PY'
+          import hashlib, json, os, sys
+          binary, destination = sys.argv[1:]
+          digest = hashlib.sha256()
+          with open(binary, "rb") as handle:
+              for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                  digest.update(chunk)
+          payload = {
+              "entries": [{
+                  "mode": "0755",
+                  "path": "cli-proxy-api",
+                  "sha256": digest.hexdigest(),
+                  "size": os.path.getsize(binary),
+                  "type": "file",
+              }],
+              "root_mode": "0775",
+              "schema_version": 1,
+          }
+          with open(destination, "w", encoding="utf-8") as handle:
+              handle.write(json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n")
+          PY
+
+            tar --sort=name --mtime='UTC 1970-01-01' --owner=0 --group=0 \
+              --numeric-owner --format=gnu -C "$out" -cf - cpa | gzip -n -9 > "$out/cpa-linux-arm64.tar.gz"
+          done
+
+          cmp -s /tmp/cpa-output-1/cpa/cli-proxy-api /tmp/cpa-output-2/cpa/cli-proxy-api
+          cmp -s /tmp/cpa-output-1/cpa-inventory.json /tmp/cpa-output-2/cpa-inventory.json
+          cmp -s /tmp/cpa-output-1/cpa-linux-arm64.tar.gz /tmp/cpa-output-2/cpa-linux-arm64.tar.gz
+          cp /tmp/cpa-output-1/cpa-linux-arm64.tar.gz .
+          cp /tmp/cpa-output-1/cpa-inventory.json .
+          sha256sum cpa-linux-arm64.tar.gz cpa-inventory.json > SHA256SUMS
+          sha256sum /tmp/cpa-output-1/cpa/cli-proxy-api >> SHA256SUMS
+
+      - name: Upload exact candidate artifact
+        uses: actions/upload-artifact@v4
         with:
-          go-version-file: go.mod
-          cache: true
-      - name: Test
-        run: go test ./...
-      - name: Vet
-        run: go vet ./...
+          name: cpa-responses-http-continuation-3724d69-arm64
+          path: |
+            cpa-linux-arm64.tar.gz
+            cpa-inventory.json
+            SHA256SUMS
+          if-no-files-found: error
+          retention-days: 7
