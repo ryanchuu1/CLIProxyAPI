@@ -39,7 +39,7 @@ func TestResponsesHTTPReplayContinuation(t *testing.T) {
 	}
 
 	secondResponse := []byte(`{"id":"resp_2","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Blue"}]}]}`)
-	rememberResponsesHTTPReplay(replayed, secondResponse)
+	rememberResponsesHTTPReplay(secondRequest, secondResponse)
 	thirdRequest := []byte(`{"model":"gpt-test","previous_response_id":"resp_2","input":"Repeat it","stream":false}`)
 	thirdReplay, errThird := prepareResponsesHTTPReplay(thirdRequest)
 	if errThird != nil {
@@ -80,20 +80,20 @@ func TestResponsesHTTPReplayPreservesEarlierToolOutputAcrossTurns(t *testing.T) 
 	rememberResponsesHTTPReplay(firstRequest, firstResponse)
 
 	secondRequest := []byte(`{"model":"gpt-test","previous_response_id":"resp_spawn","input":[{"type":"function_call_output","call_id":"spawn_1","output":"child-1"}]}`)
-	secondReplay, errSecond := prepareResponsesHTTPReplay(secondRequest)
+	_, errSecond := prepareResponsesHTTPReplay(secondRequest)
 	if errSecond != nil {
 		t.Fatalf("prepare second turn: %v", errSecond)
 	}
 	secondResponse := []byte(`{"id":"resp_wait","output":[{"type":"function_call","call_id":"wait_1","name":"wait_agent","arguments":"{}"}]}`)
-	rememberResponsesHTTPReplay(secondReplay, secondResponse)
+	rememberResponsesHTTPReplay(secondRequest, secondResponse)
 
 	thirdRequest := []byte(`{"model":"gpt-test","previous_response_id":"resp_wait","input":[{"type":"function_call_output","call_id":"wait_1","output":"WAIT_SENTINEL_42"}]}`)
-	thirdReplay, errThird := prepareResponsesHTTPReplay(thirdRequest)
+	_, errThird := prepareResponsesHTTPReplay(thirdRequest)
 	if errThird != nil {
 		t.Fatalf("prepare third turn: %v", errThird)
 	}
 	thirdResponse := []byte(`{"id":"resp_close","output":[{"type":"function_call","call_id":"close_1","name":"close_agent","arguments":"{}"}]}`)
-	rememberResponsesHTTPReplay(thirdReplay, thirdResponse)
+	rememberResponsesHTTPReplay(thirdRequest, thirdResponse)
 
 	fourthRequest := []byte(`{"model":"gpt-test","previous_response_id":"resp_close","input":[{"type":"function_call_output","call_id":"close_1","output":"closed"}]}`)
 	fourthReplay, errFourth := prepareResponsesHTTPReplay(fourthRequest)
