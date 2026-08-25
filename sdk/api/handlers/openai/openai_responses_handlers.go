@@ -53,6 +53,8 @@ type responsesSSEFramer struct {
 	outputItems          map[int][]byte
 	outputOrder          []int
 	unindexedOutputItems [][]byte
+	completedResponseID  string
+	completedOutput      []byte
 	lastEvent            string
 	terminalEvent        string
 	terminalError        *interfaces.ErrorMessage
@@ -162,6 +164,12 @@ func (f *responsesSSEFramer) repairFrame(frame []byte) []byte {
 		f.recordOutputItem(payload)
 	case "response.completed":
 		repaired := f.repairCompletedPayload(payload)
+		responseID := strings.TrimSpace(gjson.GetBytes(repaired, "response.id").String())
+		output := gjson.GetBytes(repaired, "response.output")
+		if responseID != "" && output.Exists() && output.IsArray() {
+			f.completedResponseID = responseID
+			f.completedOutput = append(f.completedOutput[:0], output.Raw...)
+		}
 		if !bytes.Equal(repaired, payload) {
 			return responsesSSEFrameWithData(frame, repaired)
 		}
@@ -453,7 +461,7 @@ type OpenAIResponsesAPIHandler struct {
 //   - apiHandlers: The base API handlers instance
 //
 // Returns:
-//   - *OpenAIResponsesAPIHandler: A new OpenAIResponses API handlers instance
+//   - *OpenAIResponsesAPIHandler: A new OpenAIResponsesAPIHandler.
 func NewOpenAIResponsesAPIHandler(apiHandlers *handlers.BaseAPIHandler) *OpenAIResponsesAPIHandler {
 	return &OpenAIResponsesAPIHandler{
 		BaseAPIHandler: apiHandlers,
@@ -543,6 +551,17 @@ func (h *OpenAIResponsesAPIHandler) Responses(c *gin.Context) {
 		})
 		return
 	}
+	replayRequestJSON := append([]byte(nil), rawJSON...)
+	rawJSON, err = prepareResponsesHTTPReplay(rawJSON)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, handlers.ErrorResponse{
+			Error: handlers.ErrorDetail{
+				Message: fmt.Sprintf("Invalid request: %v", err),
+				Type:    "invalid_request_error",
+			},
+		})
+		return
+	}
 
 	rawJSON = h.prepareCodexMultiAgentV2Tools(c, rawJSON)
 	rawJSON = h.prepareCodexOrphanDelegation(c, rawJSON)
@@ -550,9 +569,9 @@ func (h *OpenAIResponsesAPIHandler) Responses(c *gin.Context) {
 	// Check if the client requested a streaming response.
 	streamResult := gjson.GetBytes(rawJSON, "stream")
 	if streamResult.Type == gjson.True {
-		h.handleStreamingResponse(c, rawJSON)
+		h.handleStreamingResponse(c, rawJSON, replayRequestJSON)
 	} else {
-		h.handleNonStreamingResponse(c, rawJSON)
+		h.handleNonStreamingResponse(c, rawJSON, replayRequestJSON)
 	}
 
 }
@@ -610,7 +629,7 @@ func (h *OpenAIResponsesAPIHandler) Compact(c *gin.Context) {
 // Parameters:
 //   - c: The Gin context containing the HTTP request and response
 //   - rawJSON: The raw JSON bytes of the OpenAIResponses-compatible request
-func (h *OpenAIResponsesAPIHandler) handleNonStreamingResponse(c *gin.Context, rawJSON []byte) {
+func (h *OpenAIResponsesAPIHandler) handleNonStreamingResponse(c *gin.Context, rawJSON, replayRequestJSON []byte) {
 	c.Header("Content-Type", "application/json")
 
 	modelName := gjson.GetBytes(rawJSON, "model").String()
@@ -624,6 +643,7 @@ func (h *OpenAIResponsesAPIHandler) handleNonStreamingResponse(c *gin.Context, r
 		cliCancel(errMsg.Error)
 		return
 	}
+	rememberResponsesHTTPReplay(replayRequestJSON, resp)
 	handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
 	_, _ = c.Writer.Write(resp)
 	cliCancel()
@@ -636,7 +656,7 @@ func (h *OpenAIResponsesAPIHandler) handleNonStreamingResponse(c *gin.Context, r
 // Parameters:
 //   - c: The Gin context containing the HTTP request and response
 //   - rawJSON: The raw JSON bytes of the OpenAIResponses-compatible request
-func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJSON []byte) {
+func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJSON, replayRequestJSON []byte) {
 	// Get the http.Flusher interface to manually flush the response.
 	flusher, ok := c.Writer.(http.Flusher)
 	if !ok {
@@ -665,6 +685,11 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJ
 		failureEvent = "response.failed"
 	}
 	framer := &responsesSSEFramer{failureEvent: failureEvent}
+	defer func() {
+		if framer.terminalEvent == "response.completed" {
+			rememberResponsesHTTPReplayOutput(replayRequestJSON, framer.completedResponseID, framer.completedOutput)
+		}
+	}()
 	var initialOutput bytes.Buffer
 
 	// Peek at the first complete SSE data frame.
