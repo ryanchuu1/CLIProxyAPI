@@ -651,6 +651,10 @@ type OpenAICompatibilityModel struct {
 	// Alias is the model name alias that clients will use to reference this model.
 	Alias string `yaml:"alias" json:"alias"`
 
+	// ContextLength is the client-visible context window advertised for this model.
+	// Zero means unknown and is omitted from model discovery.
+	ContextLength int `yaml:"context-length,omitempty" json:"context-length,omitempty"`
+
 	// ForceMapping rewrites upstream response model fields back to Alias.
 	ForceMapping bool `yaml:"force-mapping,omitempty" json:"force-mapping,omitempty"`
 
