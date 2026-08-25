@@ -36,6 +36,17 @@ func TestComputeOpenAICompatModelsHash_IncludesImageFlag(t *testing.T) {
 	}
 }
 
+func TestComputeOpenAICompatModelsHash_IncludesContextLength(t *testing.T) {
+	base := ComputeOpenAICompatModelsHash([]config.OpenAICompatibilityModel{{Name: "model", Alias: "alias", ContextLength: 128_000}})
+	changed := ComputeOpenAICompatModelsHash([]config.OpenAICompatibilityModel{{Name: "model", Alias: "alias", ContextLength: 1_000_000}})
+	if base == "" || changed == "" {
+		t.Fatal("hashes should not be empty")
+	}
+	if base == changed {
+		t.Fatal("hash should change when context length changes")
+	}
+}
+
 func TestComputeOpenAICompatModelsHash_NormalizesAndDedups(t *testing.T) {
 	a := []config.OpenAICompatibilityModel{
 		{Name: "gpt-4", Alias: "gpt4"},
