@@ -1,0 +1,6 @@
+./certificate.go
+./client.go
+./global.go
+./kv_helpers.go
+./plugin_status.go
+./requests.go

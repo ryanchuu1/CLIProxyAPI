@@ -1,0 +1,8 @@
+./auth.go
+./checksum.go
+./direct.go
+./github.go
+./install.go
+./manifest.go
+./registry.go
+./version.go

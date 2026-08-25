@@ -1,0 +1,7 @@
+./format.go
+./formats.go
+./helpers.go
+./pipeline.go
+./plugin_hooks.go
+./registry.go
+./types.go

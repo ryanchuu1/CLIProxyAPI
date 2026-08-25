@@ -1,0 +1,8 @@
+./apply.go
+./convert.go
+./errors.go
+./strip.go
+./suffix.go
+./text.go
+./types.go
+./validate.go

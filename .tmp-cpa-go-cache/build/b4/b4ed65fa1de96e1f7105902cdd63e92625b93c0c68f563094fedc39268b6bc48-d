@@ -1,0 +1,7 @@
+./clone.go
+./config.go
+./disable_image_generation_mode.go
+./home.go
+./parse.go
+./sdk_config.go
+./vertex_compat.go
