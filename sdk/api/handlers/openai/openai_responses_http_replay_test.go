@@ -2,8 +2,10 @@ package openai
 
 import (
 	"bytes"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/tidwall/gjson"
 )
@@ -110,6 +112,38 @@ func TestResponsesHTTPReplayPreservesEarlierToolOutputAcrossTurns(t *testing.T) 
 	}
 	if !found {
 		t.Fatalf("earlier wait_agent output must survive later continuation: %s", fourthReplay)
+	}
+}
+
+func TestResponsesHTTPReplayStoreSurvivesRestart(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "responses-http-replay.json")
+	store := newResponsesHTTPReplayStore(path)
+	store.put("resp_restart", []byte(`[{"role":"user","content":"persist me"}]`))
+
+	restarted := newResponsesHTTPReplayStore(path)
+	got, ok := restarted.get("resp_restart")
+	if !ok {
+		t.Fatal("persisted replay entry must survive store reconstruction")
+	}
+	if string(got) != `[{"role":"user","content":"persist me"}]` {
+		t.Fatalf("unexpected restored replay input: %s", got)
+	}
+}
+
+func TestResponsesHTTPReplayStorePrunesExpiredOrderEntries(t *testing.T) {
+	store := newResponsesHTTPReplayStore("")
+	store.entries["expired"] = responsesHTTPReplayEntry{
+		input:     []byte(`[]`),
+		expiresAt: time.Now().Add(-time.Minute),
+	}
+	store.order = []string{"expired"}
+
+	store.put("fresh", []byte(`[]`))
+	if _, ok := store.entries["expired"]; ok {
+		t.Fatal("expired replay entry must be removed")
+	}
+	if len(store.order) != 1 || store.order[0] != "fresh" {
+		t.Fatalf("replay order must be compacted with entries, got: %#v", store.order)
 	}
 }
 

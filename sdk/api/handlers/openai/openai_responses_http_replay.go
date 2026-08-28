@@ -4,14 +4,19 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 )
 
 const (
-	responsesHTTPReplayTTL        = 30 * time.Minute
+	responsesHTTPReplayTTL        = 24 * time.Hour
 	responsesHTTPReplayMaxEntries = 256
+	responsesHTTPReplayMaxBytes   = 64 << 20
+	responsesHTTPReplayFileEnv    = "CLIPROXYAPI_RESPONSES_REPLAY_FILE"
+	responsesHTTPReplayFileV1     = 1
 )
 
 type responsesHTTPReplayEntry struct {
@@ -21,13 +26,32 @@ type responsesHTTPReplayEntry struct {
 
 type responsesHTTPReplayStore struct {
 	mu      sync.Mutex
+	path    string
 	entries map[string]responsesHTTPReplayEntry
 	order   []string
 }
 
-var responsesHTTPReplayCache = responsesHTTPReplayStore{
-	entries: make(map[string]responsesHTTPReplayEntry),
+type responsesHTTPReplayPersistedEntry struct {
+	Input     json.RawMessage `json:"input"`
+	ExpiresAt time.Time       `json:"expires_at"`
 }
+
+type responsesHTTPReplayPersistedState struct {
+	Version int                                           `json:"version"`
+	Order   []string                                      `json:"order"`
+	Entries map[string]responsesHTTPReplayPersistedEntry `json:"entries"`
+}
+
+func newResponsesHTTPReplayStore(path string) *responsesHTTPReplayStore {
+	store := &responsesHTTPReplayStore{
+		path:    strings.TrimSpace(path),
+		entries: make(map[string]responsesHTTPReplayEntry),
+	}
+	store.load()
+	return store
+}
+
+var responsesHTTPReplayCache = newResponsesHTTPReplayStore(os.Getenv(responsesHTTPReplayFileEnv))
 
 func prepareResponsesHTTPReplay(rawJSON []byte) ([]byte, error) {
 	var request map[string]json.RawMessage
@@ -136,6 +160,126 @@ func mergeResponsesHTTPJSONArrays(leftJSON, rightJSON []byte) ([]byte, error) {
 	return json.Marshal(append(left, right...))
 }
 
+func (s *responsesHTTPReplayStore) load() {
+	if s.path == "" {
+		return
+	}
+	data, errRead := os.ReadFile(s.path)
+	if errRead != nil {
+		return
+	}
+
+	var state responsesHTTPReplayPersistedState
+	if errUnmarshal := json.Unmarshal(data, &state); errUnmarshal != nil || state.Version != responsesHTTPReplayFileV1 {
+		return
+	}
+
+	now := time.Now()
+	for _, responseID := range state.Order {
+		responseID = strings.TrimSpace(responseID)
+		persisted, ok := state.Entries[responseID]
+		if !ok || responseID == "" || now.After(persisted.ExpiresAt) || len(persisted.Input) == 0 {
+			continue
+		}
+		if _, exists := s.entries[responseID]; exists {
+			continue
+		}
+		var items []json.RawMessage
+		if errInput := json.Unmarshal(persisted.Input, &items); errInput != nil {
+			continue
+		}
+		s.entries[responseID] = responsesHTTPReplayEntry{
+			input:     append([]byte(nil), persisted.Input...),
+			expiresAt: persisted.ExpiresAt,
+		}
+		s.order = append(s.order, responseID)
+	}
+	s.pruneLocked(now)
+}
+
+func (s *responsesHTTPReplayStore) persistLocked() {
+	if s.path == "" {
+		return
+	}
+	state := responsesHTTPReplayPersistedState{
+		Version: responsesHTTPReplayFileV1,
+		Order:   append([]string(nil), s.order...),
+		Entries: make(map[string]responsesHTTPReplayPersistedEntry, len(s.entries)),
+	}
+	for responseID, entry := range s.entries {
+		state.Entries[responseID] = responsesHTTPReplayPersistedEntry{
+			Input:     append(json.RawMessage(nil), entry.input...),
+			ExpiresAt: entry.expiresAt,
+		}
+	}
+	data, errMarshal := json.Marshal(state)
+	if errMarshal != nil {
+		return
+	}
+
+	dir := filepath.Dir(s.path)
+	if errMkdir := os.MkdirAll(dir, 0o700); errMkdir != nil {
+		return
+	}
+	tmp, errCreate := os.CreateTemp(dir, ".responses-http-replay-*")
+	if errCreate != nil {
+		return
+	}
+	tmpName := tmp.Name()
+	keep := false
+	defer func() {
+		_ = tmp.Close()
+		if !keep {
+			_ = os.Remove(tmpName)
+		}
+	}()
+	if errChmod := tmp.Chmod(0o600); errChmod != nil {
+		return
+	}
+	if _, errWrite := tmp.Write(data); errWrite != nil {
+		return
+	}
+	if errSync := tmp.Sync(); errSync != nil {
+		return
+	}
+	if errClose := tmp.Close(); errClose != nil {
+		return
+	}
+	if errRename := os.Rename(tmpName, s.path); errRename != nil {
+		return
+	}
+	keep = true
+}
+
+func (s *responsesHTTPReplayStore) pruneLocked(now time.Time) {
+	compacted := make([]string, 0, len(s.order))
+	seen := make(map[string]struct{}, len(s.entries))
+	totalBytes := 0
+	for _, responseID := range s.order {
+		entry, ok := s.entries[responseID]
+		if !ok || now.After(entry.expiresAt) {
+			delete(s.entries, responseID)
+			continue
+		}
+		if _, duplicate := seen[responseID]; duplicate {
+			continue
+		}
+		seen[responseID] = struct{}{}
+		compacted = append(compacted, responseID)
+		totalBytes += len(entry.input)
+	}
+	s.order = compacted
+
+	for len(s.order) > responsesHTTPReplayMaxEntries || totalBytes > responsesHTTPReplayMaxBytes {
+		oldest := s.order[0]
+		s.order = s.order[1:]
+		if entry, ok := s.entries[oldest]; ok {
+			totalBytes -= len(entry.input)
+			delete(s.entries, oldest)
+		}
+	}
+}
+
 func (s *responsesHTTPReplayStore) get(responseID string) ([]byte, bool) {
 	responseID = strings.TrimSpace(responseID)
 	if responseID == "" {
@@ -145,12 +289,15 @@ func (s *responsesHTTPReplayStore) get(responseID string) ([]byte, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	now := time.Now()
 	entry, ok := s.entries[responseID]
 	if !ok {
 		return nil, false
 	}
-	if time.Now().After(entry.expiresAt) {
+	if now.After(entry.expiresAt) {
 		delete(s.entries, responseID)
+		s.pruneLocked(now)
+		s.persistLocked()
 		return nil, false
 	}
 	return append([]byte(nil), entry.input...), true
@@ -158,7 +305,7 @@ func (s *responsesHTTPReplayStore) get(responseID string) ([]byte, bool) {
 
 func (s *responsesHTTPReplayStore) put(responseID string, input []byte) {
 	responseID = strings.TrimSpace(responseID)
-	if responseID == "" || len(input) == 0 {
+	if responseID == "" || len(input) == 0 || len(input) > responsesHTTPReplayMaxBytes {
 		return
 	}
 
@@ -166,29 +313,21 @@ func (s *responsesHTTPReplayStore) put(responseID string, input []byte) {
 	defer s.mu.Unlock()
 
 	now := time.Now()
-	for id, entry := range s.entries {
-		if now.After(entry.expiresAt) {
-			delete(s.entries, id)
-		}
-	}
 	if _, exists := s.entries[responseID]; !exists {
 		s.order = append(s.order, responseID)
 	}
-	for len(s.entries) >= responsesHTTPReplayMaxEntries && len(s.order) > 0 {
-		oldest := s.order[0]
-		s.order = s.order[1:]
-		delete(s.entries, oldest)
-	}
-
 	s.entries[responseID] = responsesHTTPReplayEntry{
 		input:     append([]byte(nil), input...),
 		expiresAt: now.Add(responsesHTTPReplayTTL),
 	}
+	s.pruneLocked(now)
+	s.persistLocked()
 }
 
 func resetResponsesHTTPReplayCacheForTest() {
 	responsesHTTPReplayCache.mu.Lock()
 	defer responsesHTTPReplayCache.mu.Unlock()
+	responsesHTTPReplayCache.path = ""
 	responsesHTTPReplayCache.entries = make(map[string]responsesHTTPReplayEntry)
 	responsesHTTPReplayCache.order = nil
 }
