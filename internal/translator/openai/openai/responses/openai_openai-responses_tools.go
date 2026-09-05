@@ -1,12 +1,108 @@
 package responses
 
 import (
+	"fmt"
 	"strings"
 
 	translatorcommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/common"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
+
+// ValidateOpenAIResponsesNamespaceTools rejects namespace declarations that
+// would be silently dropped or ambiguously flattened by Chat Completions
+// translation. Provider-specific non-namespace tools remain untouched.
+func ValidateOpenAIResponsesNamespaceTools(requestRawJSON []byte) error {
+	if !gjson.ValidBytes(requestRawJSON) {
+		return fmt.Errorf("invalid JSON payload")
+	}
+
+	tools := gjson.GetBytes(requestRawJSON, "tools")
+	if !tools.Exists() {
+		return nil
+	}
+	if !tools.IsArray() {
+		return fmt.Errorf("tools must be an array")
+	}
+
+	seenNames := map[string]struct{}{}
+	var validationErr error
+	tools.ForEach(func(_, tool gjson.Result) bool {
+		toolType := strings.TrimSpace(tool.Get("type").String())
+		switch toolType {
+		case "", "function", "custom":
+			name := responsesToolName(tool)
+			if name == "" {
+				validationErr = fmt.Errorf("tool name must not be empty")
+				return false
+			}
+			if err := recordResponsesToolName(seenNames, name); err != nil {
+				validationErr = err
+				return false
+			}
+		case "namespace":
+			if err := validateResponsesNamespaceTool(seenNames, tool); err != nil {
+				validationErr = err
+				return false
+			}
+		}
+		return true
+	})
+	return validationErr
+}
+
+func validateResponsesNamespaceTool(seenNames map[string]struct{}, tool gjson.Result) error {
+	namespaceName := strings.TrimSpace(tool.Get("name").String())
+	if namespaceName == "" {
+		return fmt.Errorf("namespace tool name must not be empty")
+	}
+	if !strings.HasPrefix(namespaceName, "mcp__") && strings.Contains(namespaceName, "__") {
+		return fmt.Errorf("namespace tool name must not contain __")
+	}
+	children := tool.Get("tools")
+	if !children.Exists() || !children.IsArray() {
+		return fmt.Errorf("namespace tool %q must contain a tools array", namespaceName)
+	}
+	if len(children.Array()) == 0 {
+		return fmt.Errorf("namespace tool %q must contain at least one child tool", namespaceName)
+	}
+
+	childNames := map[string]struct{}{}
+	var validationErr error
+	children.ForEach(func(_, child gjson.Result) bool {
+		childType := strings.TrimSpace(child.Get("type").String())
+		if childType != "" && childType != "function" && childType != "custom" {
+			return true
+		}
+		childName := responsesToolName(child)
+		if childName == "" {
+			validationErr = fmt.Errorf("namespace child tool name must not be empty")
+			return false
+		}
+		if strings.HasPrefix(childName, namespaceName+"__") {
+			validationErr = fmt.Errorf("namespace child tool name must not be pre-qualified")
+			return false
+		}
+		if err := recordResponsesToolName(childNames, childName); err != nil {
+			validationErr = fmt.Errorf("duplicate namespace child tool name %q", childName)
+			return false
+		}
+		if err := recordResponsesToolName(seenNames, qualifyResponsesNamespaceToolName(namespaceName, childName)); err != nil {
+			validationErr = err
+			return false
+		}
+		return true
+	})
+	return validationErr
+}
+
+func recordResponsesToolName(seenNames map[string]struct{}, name string) error {
+	if _, exists := seenNames[name]; exists {
+		return fmt.Errorf("duplicate tool name %q", name)
+	}
+	seenNames[name] = struct{}{}
+	return nil
+}
 
 // responsesToolDeclaration is one Responses tool declaration paired with the
 // Chat Completions function name it produces. Namespace children carry both
