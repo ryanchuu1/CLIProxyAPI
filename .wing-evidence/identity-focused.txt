@@ -1,0 +1,7 @@
+=== executor focused ===
+sh: 1: go: not found
+executor_exit=127
+=== responses focused ===
+sh: 1: go: not found
+responses_exit=127
+focused_exit=1

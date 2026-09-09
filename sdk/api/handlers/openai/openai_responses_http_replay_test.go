@@ -2,9 +2,11 @@ package openai
 
 import (
 	"bytes"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
+	"github.com/gin-gonic/gin"
 	"github.com/tidwall/gjson"
 )
 
@@ -150,5 +152,73 @@ func TestResponsesHTTPReplayLeavesUnselectedModelsNative(t *testing.T) {
 	}
 	if !bytes.Equal(got, raw) {
 		t.Fatalf("native continuation request changed unexpectedly: %s", got)
+	}
+}
+
+func TestResponsesHTTPConversationExecutionSessionUsesExplicitCodexSession(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	enableResponsesHTTPReplayForTest(t, "gpt-test")
+
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = httptest.NewRequest("POST", "/v1/responses", nil)
+	c.Request.Header.Set("Session-Id", "codex-session-1")
+
+	raw := []byte(`{"model":"gpt-test","input":"hello"}`)
+	if got := responsesHTTPConversationExecutionSessionID(c, raw); got != "codex:codex-session-1" {
+		t.Fatalf("execution session = %q, want explicit Codex session", got)
+	}
+}
+
+func TestResponsesHTTPConversationExecutionSessionRequiresTrustedSignalOnFirstTurn(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	enableResponsesHTTPReplayForTest(t, "gpt-test")
+
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = httptest.NewRequest("POST", "/v1/responses", nil)
+	raw := []byte(`{"model":"gpt-test","input":"same prompt text"}`)
+
+	if got := responsesHTTPConversationExecutionSessionID(c, raw); got != "" {
+		t.Fatalf("first turn without explicit session must not derive conversation identity, got %q", got)
+	}
+}
+
+func TestResponsesHTTPConversationExecutionSessionUsesReplayRootAcrossBranches(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	enableResponsesHTTPReplayForTest(t, "gpt-test")
+	resetResponsesHTTPReplayCacheForTest()
+	t.Cleanup(resetResponsesHTTPReplayCacheForTest)
+
+	rootRequest := []byte(`{"model":"gpt-test","input":"root"}`)
+	rootResponse := []byte(`{"id":"resp_root","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"root answer"}]}]}`)
+	rememberResponsesHTTPReplay(rootRequest, rootResponse)
+
+	childRequest := []byte(`{"model":"gpt-test","previous_response_id":"resp_root","input":"child"}`)
+	childResponse := []byte(`{"id":"resp_child","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"child answer"}]}]}`)
+	rememberResponsesHTTPReplay(childRequest, childResponse)
+
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = httptest.NewRequest("POST", "/v1/responses", nil)
+
+	branchA := []byte(`{"model":"gpt-test","previous_response_id":"resp_root","input":"branch a"}`)
+	branchB := []byte(`{"model":"gpt-test","previous_response_id":"resp_child","input":"branch b"}`)
+	if got := responsesHTTPConversationExecutionSessionID(c, branchA); got != "responses:resp_root" {
+		t.Fatalf("root continuation identity = %q", got)
+	}
+	if got := responsesHTTPConversationExecutionSessionID(c, branchB); got != "responses:resp_root" {
+		t.Fatalf("descendant continuation identity = %q, want same replay root", got)
+	}
+}
+
+func TestResponsesHTTPConversationExecutionSessionSkipsUnmanagedModels(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	enableResponsesHTTPReplayForTest(t, "managed-only")
+
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = httptest.NewRequest("POST", "/v1/responses", nil)
+	c.Request.Header.Set("Session-Id", "must-not-propagate")
+	raw := []byte(`{"model":"native-model","input":"hello"}`)
+
+	if got := responsesHTTPConversationExecutionSessionID(c, raw); got != "" {
+		t.Fatalf("unmanaged model must not receive local conversation identity, got %q", got)
 	}
 }

@@ -14,7 +14,10 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gin-gonic/gin"
+	cliproxysession "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/session"
 	log "github.com/sirupsen/logrus"
+	"github.com/tidwall/gjson"
 )
 
 const (
@@ -373,6 +376,62 @@ func (s *responsesHTTPReplayStore) get(responseID string) ([]byte, bool) {
 		return nil, false
 	}
 	return merged, true
+}
+
+func (s *responsesHTTPReplayStore) rootResponseID(responseID string) (string, bool) {
+	responseID = strings.TrimSpace(responseID)
+	if responseID == "" {
+		return "", false
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if err := s.cleanupExpiredLocked(s.now()); err != nil {
+		log.Warnf("responses HTTP replay cleanup failed: %v", err)
+		return "", false
+	}
+	entry, ok := s.entries[responseID]
+	if !ok {
+		return "", false
+	}
+	root := strings.TrimSpace(entry.rootResponseID)
+	if root == "" {
+		return "", false
+	}
+	return root, true
+}
+
+func responsesHTTPConversationExecutionSessionID(c *gin.Context, rawJSON []byte) string {
+	if !responsesHTTPReplayEnabledForRequest(rawJSON) {
+		return ""
+	}
+
+	if previousResponseID := strings.TrimSpace(gjson.GetBytes(rawJSON, "previous_response_id").String()); previousResponseID != "" {
+		if rootResponseID, ok := responsesHTTPReplayCache.rootResponseID(previousResponseID); ok {
+			return "responses:" + rootResponseID
+		}
+		return ""
+	}
+
+	if c == nil || c.Request == nil {
+		return ""
+	}
+	trustedCodexSignal := false
+	for _, header := range []string{"Session-Id", "Session_id", "Thread-Id", "Thread_id", "X-Codex-Turn-Metadata"} {
+		if strings.TrimSpace(c.Request.Header.Get(header)) != "" {
+			trustedCodexSignal = true
+			break
+		}
+	}
+	if !trustedCodexSignal {
+		return ""
+	}
+	info, ok := cliproxysession.ExtractSessionInfo(c.Request.Header, rawJSON, nil)
+	if !ok || info.ClientType != "codex" {
+		return ""
+	}
+	return strings.TrimSpace(info.SessionID)
 }
 
 func (s *responsesHTTPReplayStore) put(responseID, parentResponseID string, input, output []byte) error {

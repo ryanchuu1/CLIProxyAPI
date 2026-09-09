@@ -34,6 +34,7 @@ const (
 	openAICompatImagesEditsPath             = "/images/edits"
 	openAICompatDefaultImageEndpoint        = openAICompatImagesGenerationsPath
 	openAICompatMultipartMemory       int64 = 32 << 20
+	webModelConversationHeader              = "X-CPA-Conversation-ID"
 )
 
 // OpenAICompatExecutor implements a stateless executor for OpenAI-compatible providers.
@@ -158,6 +159,7 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 		attrs = auth.Attributes
 	}
 	util.ApplyCustomHeadersFromAttrs(httpReq, attrs, opts.Headers)
+	applyWebModelConversationHeader(httpReq, auth, opts.Metadata)
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
 		authID = auth.ID
@@ -370,6 +372,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 		attrs = auth.Attributes
 	}
 	util.ApplyCustomHeadersFromAttrs(httpReq, attrs, opts.Headers)
+	applyWebModelConversationHeader(httpReq, auth, opts.Metadata)
 	httpReq.Header.Set("Accept", "text/event-stream")
 	httpReq.Header.Set("Cache-Control", "no-cache")
 	var authID, authLabel, authType, authValue string
@@ -568,6 +571,25 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 		reporter.EnsurePublished(ctx)
 	}()
 	return &cliproxyexecutor.StreamResult{Headers: httpResp.Header.Clone(), Chunks: out}, nil
+}
+
+func applyWebModelConversationHeader(req *http.Request, auth *cliproxyauth.Auth, metadata map[string]any) {
+	if req == nil {
+		return
+	}
+	req.Header.Del(webModelConversationHeader)
+	if auth == nil || !strings.EqualFold(strings.TrimSpace(auth.Attributes["compat_name"]), "webmodel") {
+		return
+	}
+	executionSessionID, _ := metadata[cliproxyexecutor.ExecutionSessionMetadataKey].(string)
+	executionSessionID = strings.TrimSpace(executionSessionID)
+	callerScope, _ := metadata[cliproxyexecutor.CallerScopeMetadataKey].(string)
+	callerScope = strings.TrimSpace(callerScope)
+	if executionSessionID == "" || callerScope == "" {
+		return
+	}
+	identity := strings.Join([]string{"cpa-webmodel-conversation-v1", callerScope, executionSessionID}, "\x00")
+	req.Header.Set(webModelConversationHeader, uuid.NewSHA1(uuid.NameSpaceOID, []byte(identity)).String())
 }
 
 func (e *OpenAICompatExecutor) executeImagesStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, endpointPath string) (_ *cliproxyexecutor.StreamResult, err error) {

@@ -76,6 +76,104 @@ func TestOpenAICompatExecutorCompactPassthrough(t *testing.T) {
 	}
 }
 
+func TestOpenAICompatWebModelConversationHeaderIsTrustedAndCallerScoped(t *testing.T) {
+	const internalHeader = "X-CPA-Conversation-ID"
+	var captured []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		captured = append(captured, r.Header.Get(internalHeader))
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"chatcmpl_1","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`))
+	}))
+	defer server.Close()
+
+	executor := NewOpenAICompatExecutor("openai-compatibility", &config.Config{})
+	auth := &cliproxyauth.Auth{
+		Provider: "openai-compatibility",
+		Attributes: map[string]string{
+			"base_url":     server.URL + "/v1",
+			"api_key":      "test",
+			"compat_name":  "webmodel",
+			"provider_key": "webmodel",
+		},
+	}
+	payload := []byte(`{"model":"chatgpt-web/test","messages":[{"role":"user","content":"hello"}]}`)
+	execute := func(callerScope string) {
+		t.Helper()
+		_, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+			Model:   "chatgpt-web/test",
+			Payload: payload,
+		}, cliproxyexecutor.Options{
+			SourceFormat: sdktranslator.FormatOpenAI,
+			Headers: http.Header{
+				internalHeader: []string{"caller-spoof"},
+			},
+			Metadata: map[string]any{
+				cliproxyexecutor.ExecutionSessionMetadataKey: "codex:session-1",
+				cliproxyexecutor.CallerScopeMetadataKey:      callerScope,
+			},
+		})
+		if err != nil {
+			t.Fatalf("Execute error: %v", err)
+		}
+	}
+
+	execute("caller-a")
+	execute("caller-a")
+	execute("caller-b")
+	if len(captured) != 3 {
+		t.Fatalf("captured headers = %v", captured)
+	}
+	if captured[0] == "" || captured[0] == "caller-spoof" {
+		t.Fatalf("webmodel header must be server-derived, got %q", captured[0])
+	}
+	if captured[0] != captured[1] {
+		t.Fatalf("same caller/session must be deterministic: %q != %q", captured[0], captured[1])
+	}
+	if captured[0] == captured[2] {
+		t.Fatalf("different caller scopes must not share conversation identity: %q", captured[0])
+	}
+}
+
+func TestOpenAICompatConversationHeaderIsRemovedForOtherProviders(t *testing.T) {
+	const internalHeader = "X-CPA-Conversation-ID"
+	var captured string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		captured = r.Header.Get(internalHeader)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"chatcmpl_1","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`))
+	}))
+	defer server.Close()
+
+	executor := NewOpenAICompatExecutor("openai-compatibility", &config.Config{})
+	auth := &cliproxyauth.Auth{
+		Provider: "openai-compatibility",
+		Attributes: map[string]string{
+			"base_url":     server.URL + "/v1",
+			"api_key":      "test",
+			"compat_name":  "other-provider",
+			"provider_key": "other-provider",
+		},
+	}
+	payload := []byte(`{"model":"other/model","messages":[{"role":"user","content":"hello"}]}`)
+	_, err := executor.Execute(context.Background(), auth, cliproxyexecutor.Request{
+		Model:   "other/model",
+		Payload: payload,
+	}, cliproxyexecutor.Options{
+		SourceFormat: sdktranslator.FormatOpenAI,
+		Headers:      http.Header{internalHeader: []string{"caller-spoof"}},
+		Metadata: map[string]any{
+			cliproxyexecutor.ExecutionSessionMetadataKey: "session-1",
+			cliproxyexecutor.CallerScopeMetadataKey:      "caller-a",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Execute error: %v", err)
+	}
+	if captured != "" {
+		t.Fatalf("internal conversation header leaked to another provider: %q", captured)
+	}
+}
+
 func TestOpenAICompatExecutorPayloadOverrideWinsOverThinkingSuffix(t *testing.T) {
 	var gotBody []byte
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
