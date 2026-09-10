@@ -462,7 +462,7 @@ type OpenAIResponsesAPIHandler struct {
 	*handlers.BaseAPIHandler
 }
 
-// NewOpenAIResponsesAPIHandler creates a new OpenAIResponsesAPI handlers instance.
+// NewOpenAIResponsesAPIHandler creates a new OpenAIResponses API handlers instance.
 // It takes an BaseAPIHandler instance as input and returns an OpenAIResponsesAPIHandler.
 //
 // Parameters:
@@ -668,8 +668,7 @@ func (h *OpenAIResponsesAPIHandler) handleNonStreamingResponse(c *gin.Context, r
 }
 
 // handleStreamingResponse handles streaming responses for Gemini models.
-// It establishes a streaming connection with the backend service and forwards
-// the response chunks to the client in real-time using Server-Sent Events.
+// It establishes a streaming connection with the backend service and forwards the response chunks to the client in real-time using Server-Sent Events.
 //
 // Parameters:
 //   - c: The Gin context containing the HTTP request and response
