@@ -22,7 +22,6 @@ import (
 	. "github.com/router-for-me/CLIProxyAPI/v7/internal/constant"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
-	responsesconverter "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/openai/openai/responses"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -463,7 +462,7 @@ type OpenAIResponsesAPIHandler struct {
 	*handlers.BaseAPIHandler
 }
 
-// NewOpenAIResponsesAPIHandler creates a new OpenAIResponses API handlers instance.
+// NewOpenAIResponsesAPIHandler creates a new OpenAIResponsesAPI handlers instance.
 // It takes an BaseAPIHandler instance as input and returns an OpenAIResponsesAPIHandler.
 //
 // Parameters:
@@ -560,7 +559,7 @@ func (h *OpenAIResponsesAPIHandler) Responses(c *gin.Context) {
 		})
 		return
 	}
-	if err := responsesconverter.ValidateOpenAIResponsesNamespaceTools(rawJSON); err != nil {
+	if err := validateOpenAIResponsesNamespaceTools(rawJSON); err != nil {
 		c.JSON(http.StatusBadRequest, handlers.ErrorResponse{
 			Error: handlers.ErrorDetail{
 				Message: fmt.Sprintf("Invalid request: %v", err),
