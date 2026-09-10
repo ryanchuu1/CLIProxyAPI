@@ -66,6 +66,7 @@ func (e *OpenAICompatExecutor) PrepareRequest(req *http.Request, auth *cliproxya
 		attrs = auth.Attributes
 	}
 	util.ApplyCustomHeadersFromAttrs(req, attrs)
+	req.Header.Del(cpaWebModelConversationHeader)
 	return nil
 }
 
@@ -159,6 +160,7 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 		attrs = auth.Attributes
 	}
 	util.ApplyCustomHeadersFromAttrs(httpReq, attrs, opts.Headers)
+	e.applyCPAWebModelConversationHeader(ctx, httpReq, auth, opts)
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
 		authID = auth.ID
@@ -253,6 +255,7 @@ func (e *OpenAICompatExecutor) executeImages(ctx context.Context, auth *cliproxy
 		attrs = auth.Attributes
 	}
 	util.ApplyCustomHeadersFromAttrs(httpReq, attrs, opts.Headers)
+	e.applyCPAWebModelConversationHeader(ctx, httpReq, auth, opts)
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
 		authID = auth.ID
@@ -372,6 +375,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 		attrs = auth.Attributes
 	}
 	util.ApplyCustomHeadersFromAttrs(httpReq, attrs, opts.Headers)
+	e.applyCPAWebModelConversationHeader(ctx, httpReq, auth, opts)
 	httpReq.Header.Set("Accept", "text/event-stream")
 	httpReq.Header.Set("Cache-Control", "no-cache")
 	var authID, authLabel, authType, authValue string
@@ -586,8 +590,7 @@ func (e *OpenAICompatExecutor) executeImagesStream(ctx context.Context, auth *cl
 
 	payload, contentType, errPrepare := prepareOpenAICompatImagesPayload(req.Payload, baseModel, opts.Headers.Get("Content-Type"), true)
 	if errPrepare != nil {
-		err = errPrepare
-		return nil, err
+		return nil, errPrepare
 	}
 	if contentType == "" {
 		contentType = "application/json"
@@ -611,6 +614,7 @@ func (e *OpenAICompatExecutor) executeImagesStream(ctx context.Context, auth *cl
 		attrs = auth.Attributes
 	}
 	util.ApplyCustomHeadersFromAttrs(httpReq, attrs, opts.Headers)
+	e.applyCPAWebModelConversationHeader(ctx, httpReq, auth, opts)
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
 		authID = auth.ID
