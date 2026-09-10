@@ -6,13 +6,35 @@ const (
 	// ABIVersion tracks the native C ABI shape (native plugin exports).
 	ABIVersion uint32 = 1
 	// SchemaVersion tracks the RPC JSON contract exchanged at plugin.register.
-	// Increment only for breaking RPC changes. New capabilities such as ModelRouter
-	// are gated by capability flags and method names while the version stays at 1.
-	SchemaVersion uint32 = 1
+	// Version 2 adds request lifecycle completion and active request termination.
+	// Version 3 omits OriginalRequest/RequestBody on payload stream chunks
+	// (ChunkIndex >= 0); those fields remain on StreamChunkHeaderInitIndex only.
+	// Plugins that still need per-chunk request bodies should keep schema_version < 3.
+	// Version 4 adds upstream WebSocket response event observation.
+	// Version 5 omits HistoryChunks on payload stream chunks (ChunkIndex >= 0);
+	// those fields remain on StreamChunkHeaderInitIndex only. Plugins that still need
+	// per-chunk history chunks should keep schema_version < 5.
+	// Version 6 preserves raw JSON bodies for plugin management responses.
+	// Plugins that still require HTML entity escaping on JSON response strings
+	// should keep schema_version < 6.
+	SchemaVersion uint32 = 6
+	// SchemaVersionStreamChunkOmitRequestBody is the first schema version that omits
+	// request bodies on payload stream-chunk interceptor calls.
+	SchemaVersionStreamChunkOmitRequestBody uint32 = 3
+	// SchemaVersionWebSocketResponseObserver is the first schema version that supports
+	// upstream WebSocket response event observation.
+	SchemaVersionWebSocketResponseObserver uint32 = 4
+	// SchemaVersionStreamChunkOmitHistory is the first schema version that omits
+	// history chunks on payload stream-chunk interceptor calls.
+	SchemaVersionStreamChunkOmitHistory uint32 = 5
+	// SchemaVersionRawManagementResponse is the first schema version where plugin
+	// management JSON responses are preserved without HTML-escaping strings.
+	SchemaVersionRawManagementResponse uint32 = 6
 )
 
 const (
 	MethodPluginRegister    = "plugin.register"
+	MethodPluginQuiesce     = "plugin.quiesce"
 	MethodPluginReconfigure = "plugin.reconfigure"
 	MethodPluginShutdown    = "plugin.shutdown"
 
@@ -44,12 +66,15 @@ const (
 	MethodRequestNormalize       = "request.normalize"
 	MethodRequestInterceptBefore = "request.intercept_before"
 	MethodRequestInterceptAfter  = "request.intercept_after"
+	MethodRequestComplete        = "request.complete"
 
 	MethodResponseTranslate            = "response.translate"
 	MethodResponseNormalizeBefore      = "response.normalize_before"
 	MethodResponseNormalizeAfter       = "response.normalize_after"
 	MethodResponseInterceptAfter       = "response.intercept_after"
 	MethodResponseInterceptStreamChunk = "response.intercept_stream_chunk"
+
+	MethodWebSocketResponseEvent = "websocket.response_event"
 
 	MethodThinkingIdentifier = "thinking.identifier"
 	MethodThinkingApply      = "thinking.apply"
@@ -77,6 +102,7 @@ const (
 	MethodHostAuthGet            = "host.auth.get"
 	MethodHostAuthGetRuntime     = "host.auth.get_runtime"
 	MethodHostAuthSave           = "host.auth.save"
+	MethodHostAffinityLookup     = "host.affinity.lookup"
 )
 
 type Envelope struct {

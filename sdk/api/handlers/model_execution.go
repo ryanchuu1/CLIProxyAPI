@@ -20,6 +20,22 @@ type modelExecutionOptions struct {
 	InternalSource          bool
 	SkipInterceptorPluginID string
 	SkipRouterPluginID      string
+	ForcedProvider          string
+	AuthSelectionModel      string
+}
+
+// ProtocolExecutionRequest describes a route-level model execution request with explicit protocols.
+type ProtocolExecutionRequest struct {
+	EntryProtocol      string
+	ExitProtocol       string
+	ForcedProvider     string
+	AuthSelectionModel string
+	Model              string
+	Stream             bool
+	Body               []byte
+	Headers            http.Header
+	Query              url.Values
+	Alt                string
 }
 
 // ModelExecutionRequest describes an internal model execution request.
@@ -79,6 +95,7 @@ func (e *ModelExecutionStreamError) Error() string {
 // skip plugin IDs are set, that plugin's interceptors and router are skipped
 // for the nested model execution while other plugins may still run.
 func (h *BaseAPIHandler) ExecuteModel(ctx context.Context, req ModelExecutionRequest) (ModelExecutionResponse, *interfaces.ErrorMessage) {
+	markNestedExecution(ctx)
 	if req.Stream {
 		return ModelExecutionResponse{}, modelExecutionModeError("ExecuteModel requires Stream=false")
 	}
@@ -104,6 +121,7 @@ func (h *BaseAPIHandler) ExecuteModel(ctx context.Context, req ModelExecutionReq
 // skip plugin IDs are set, that plugin's interceptors and router are skipped
 // for the nested model execution while other plugins may still run.
 func (h *BaseAPIHandler) ExecuteModelStream(ctx context.Context, req ModelExecutionRequest) (ModelExecutionStream, *interfaces.ErrorMessage) {
+	markNestedExecution(ctx)
 	if !req.Stream {
 		return ModelExecutionStream{}, modelExecutionModeError("ExecuteModelStream requires Stream=true")
 	}
@@ -113,6 +131,49 @@ func (h *BaseAPIHandler) ExecuteModelStream(ctx context.Context, req ModelExecut
 		InternalSource:          true,
 		SkipInterceptorPluginID: req.SkipInterceptorPluginID,
 		SkipRouterPluginID:      req.SkipRouterPluginID,
+	})
+	chunks, errMsg := prepareModelExecutionStream(ctx, dataChan, errChan)
+	if errMsg != nil {
+		return ModelExecutionStream{}, errMsg
+	}
+	return ModelExecutionStream{
+		StatusCode: http.StatusOK,
+		Headers:    cloneHeader(headers),
+		Chunks:     chunks,
+	}, nil
+}
+
+// ExecuteProtocolWithAuthManager executes a route-level non-streaming request with explicit protocols.
+func (h *BaseAPIHandler) ExecuteProtocolWithAuthManager(ctx context.Context, req ProtocolExecutionRequest) (ModelExecutionResponse, *interfaces.ErrorMessage) {
+	if req.Stream {
+		return ModelExecutionResponse{}, modelExecutionModeError("ExecuteProtocolWithAuthManager requires Stream=false")
+	}
+	body, headers, errMsg := h.executeWithAuthManagerFormats(ctx, req.EntryProtocol, req.ExitProtocol, req.Model, cloneBytes(req.Body), req.Alt, false, modelExecutionOptions{
+		Headers:            req.Headers,
+		Query:              req.Query,
+		ForcedProvider:     req.ForcedProvider,
+		AuthSelectionModel: req.AuthSelectionModel,
+	})
+	if errMsg != nil {
+		return ModelExecutionResponse{}, errMsg
+	}
+	return ModelExecutionResponse{
+		StatusCode: http.StatusOK,
+		Headers:    cloneHeader(headers),
+		Body:       cloneBytes(body),
+	}, nil
+}
+
+// ExecuteProtocolStreamWithAuthManager executes a route-level streaming request with explicit protocols.
+func (h *BaseAPIHandler) ExecuteProtocolStreamWithAuthManager(ctx context.Context, req ProtocolExecutionRequest) (ModelExecutionStream, *interfaces.ErrorMessage) {
+	if !req.Stream {
+		return ModelExecutionStream{}, modelExecutionModeError("ExecuteProtocolStreamWithAuthManager requires Stream=true")
+	}
+	dataChan, headers, errChan := h.executeStreamWithAuthManagerFormats(ctx, req.EntryProtocol, req.ExitProtocol, req.Model, cloneBytes(req.Body), req.Alt, false, modelExecutionOptions{
+		Headers:            req.Headers,
+		Query:              req.Query,
+		ForcedProvider:     req.ForcedProvider,
+		AuthSelectionModel: req.AuthSelectionModel,
 	})
 	chunks, errMsg := prepareModelExecutionStream(ctx, dataChan, errChan)
 	if errMsg != nil {
