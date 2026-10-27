@@ -1,6 +1,7 @@
 package openai
 
 import (
+	"encoding/json"
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v8/internal/config"
@@ -18,6 +19,21 @@ func TestCodexClientModelsResponseMultiAgentV2FollowsConfig(t *testing.T) {
 	t.Cleanup(func() {
 		modelRegistry.UnregisterClient(clientID)
 	})
+
+	var catalog struct {
+		Models []map[string]any `json:"models"`
+	}
+	if err := json.Unmarshal(registry.GetCodexClientModelsJSON(), &catalog); err != nil || len(catalog.Models) == 0 {
+		t.Fatalf("read native catalog fixture: %v", err)
+	}
+	defaultTemplate := catalog.Models[0]
+	for _, model := range catalog.Models {
+		if model["slug"] == "gpt-5.5" {
+			defaultTemplate = model
+			break
+		}
+	}
+	wantNativeVersion := defaultTemplate["multi_agent_version"]
 
 	base := handlers.NewBaseAPIHandlers(&config.SDKConfig{}, nil)
 	handler := NewOpenAIAPIHandler(base)
@@ -53,8 +69,8 @@ func TestCodexClientModelsResponseMultiAgentV2FollowsConfig(t *testing.T) {
 				}
 				return
 			}
-			if !exists || value != nil {
-				t.Fatalf("multi_agent_version = %#v, want preserved null", value)
+			if !exists || value != wantNativeVersion {
+				t.Fatalf("multi_agent_version = %#v, want preserved native value %#v", value, wantNativeVersion)
 			}
 		})
 	}
