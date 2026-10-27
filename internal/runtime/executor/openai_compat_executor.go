@@ -4,6 +4,8 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -31,6 +33,7 @@ import (
 )
 
 const (
+	cpaWebModelConversationHeader           = "X-CPA-Conversation-ID"
 	openAICompatImageHandlerType            = "openai-image"
 	openAICompatImagesGenerationsPath       = "/images/generations"
 	openAICompatImagesEditsPath             = "/images/edits"
@@ -77,6 +80,7 @@ func (e *OpenAICompatExecutor) PrepareRequest(req *http.Request, auth *cliproxya
 		attrs = auth.Attributes
 	}
 	util.ApplyCustomHeadersFromAttrs(req, attrs)
+	req.Header.Del(cpaWebModelConversationHeader)
 	return nil
 }
 
@@ -182,6 +186,7 @@ func (e *OpenAICompatExecutor) executeWithCredentials(ctx context.Context, auth 
 		attrs = auth.Attributes
 	}
 	util.ApplyCustomHeadersFromAttrs(httpReq, attrs, opts.Headers)
+	e.applyCPAWebModelConversationHeader(ctx, httpReq, auth, req, opts)
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
 		authID = auth.ID
@@ -283,6 +288,7 @@ func (e *OpenAICompatExecutor) executeImages(ctx context.Context, auth *cliproxy
 		attrs = auth.Attributes
 	}
 	util.ApplyCustomHeadersFromAttrs(httpReq, attrs, opts.Headers)
+	e.applyCPAWebModelConversationHeader(ctx, httpReq, auth, req, opts)
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
 		authID = auth.ID
@@ -416,6 +422,7 @@ func (e *OpenAICompatExecutor) executeStreamWithCredentials(ctx context.Context,
 		attrs = auth.Attributes
 	}
 	util.ApplyCustomHeadersFromAttrs(httpReq, attrs, opts.Headers)
+	e.applyCPAWebModelConversationHeader(ctx, httpReq, auth, req, opts)
 	httpReq.Header.Set("Accept", "text/event-stream")
 	httpReq.Header.Set("Cache-Control", "no-cache")
 	var authID, authLabel, authType, authValue string
@@ -696,6 +703,7 @@ func (e *OpenAICompatExecutor) executeImagesStream(ctx context.Context, auth *cl
 		attrs = auth.Attributes
 	}
 	util.ApplyCustomHeadersFromAttrs(httpReq, attrs, opts.Headers)
+	e.applyCPAWebModelConversationHeader(ctx, httpReq, auth, req, opts)
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
 		authID = auth.ID
@@ -1250,3 +1258,24 @@ func openAICompatRetryAfter(status int, headers http.Header, body []byte, now ti
 
 // SupportsApplyPatch reports the actual executor contract, independent of its provider name.
 func (e *OpenAICompatExecutor) SupportsApplyPatch() bool { return e != nil }
+
+func (e *OpenAICompatExecutor) applyCPAWebModelConversationHeader(ctx context.Context, req *http.Request, auth *cliproxyauth.Auth, request cliproxyexecutor.Request, opts cliproxyexecutor.Options) {
+	if req == nil {
+		return
+	}
+	req.Header.Del(cpaWebModelConversationHeader)
+
+	compat := e.resolveCompatConfig(auth, request)
+	if compat == nil || !strings.EqualFold(strings.TrimSpace(compat.Name), "webmodel") {
+		return
+	}
+	callerScope, _ := opts.Metadata[cliproxyexecutor.CallerScopeMetadataKey].(string)
+	callerScope = strings.TrimSpace(callerScope)
+	sessionID := util.SessionIDFromContext(ctx)
+	if callerScope == "" || sessionID == "" {
+		return
+	}
+
+	sum := sha256.Sum256([]byte("cpa:webmodel-conversation:v1\x00" + callerScope + "\x00" + sessionID))
+	req.Header.Set(cpaWebModelConversationHeader, hex.EncodeToString(sum[:]))
+}

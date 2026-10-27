@@ -13,6 +13,21 @@ import (
 )
 
 func TestModelsMultiAgentClientConfigAndReload(t *testing.T) {
+	var catalog struct {
+		Models []map[string]any `json:"models"`
+	}
+	if err := json.Unmarshal(registry.GetCodexClientModelsJSON(), &catalog); err != nil || len(catalog.Models) == 0 {
+		t.Fatalf("read native catalog fixture: %v", err)
+	}
+	defaultTemplate := catalog.Models[0]
+	for _, model := range catalog.Models {
+		if model["slug"] == "gpt-5.5" {
+			defaultTemplate = model
+			break
+		}
+	}
+	wantNativeVersion := defaultTemplate["multi_agent_version"]
+
 	for _, source := range []string{"local", "home"} {
 		t.Run(source, func(t *testing.T) {
 			const modelID = "config-multi-agent-synthetic"
@@ -72,7 +87,7 @@ func TestModelsMultiAgentClientConfigAndReload(t *testing.T) {
 						if entry["slug"] != modelID {
 							continue
 						}
-						var want any
+						want := wantNativeVersion
 						if tc.want {
 							want = "v2"
 						}

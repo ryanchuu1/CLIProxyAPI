@@ -67,6 +67,8 @@ type responsesSSEFramer struct {
 	outputItems          map[int][]byte
 	outputOrder          []int
 	unindexedOutputItems [][]byte
+	completedResponseID  string
+	completedOutput      []byte
 	lastEvent            string
 	terminalEvent        string
 	terminalError        *interfaces.ErrorMessage
@@ -223,6 +225,12 @@ func (f *responsesSSEFramer) repairFrame(frame []byte) []byte {
 		f.recordOutputItem(payload)
 	case "response.completed":
 		repaired := f.repairCompletedPayload(payload)
+		responseID := strings.TrimSpace(gjson.GetBytes(repaired, "response.id").String())
+		output := gjson.GetBytes(repaired, "response.output")
+		if responseID != "" && output.Exists() && output.IsArray() {
+			f.completedResponseID = responseID
+			f.completedOutput = append(f.completedOutput[:0], output.Raw...)
+		}
 		if !bytes.Equal(repaired, payload) {
 			return responsesSSEFrameWithData(frame, repaired)
 		}
@@ -638,15 +646,30 @@ func (h *OpenAIResponsesAPIHandler) Responses(c *gin.Context) {
 		return
 	}
 
+	if errValidate := validateOpenAIResponsesNamespaceTools(rawJSON); errValidate != nil {
+		c.JSON(http.StatusBadRequest, handlers.ErrorResponse{Error: handlers.ErrorDetail{
+			Message: fmt.Sprintf("Invalid request: %v", errValidate), Type: "invalid_request_error",
+		}})
+		return
+	}
+	replayRequestJSON := append([]byte(nil), rawJSON...)
+	rawJSON, err = prepareResponsesHTTPReplay(rawJSON)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, handlers.ErrorResponse{Error: handlers.ErrorDetail{
+			Message: fmt.Sprintf("Invalid request: %v", err), Type: "invalid_request_error",
+		}})
+		return
+	}
+
 	rawJSON = h.prepareCodexMultiAgentV2Tools(c, rawJSON)
 	rawJSON = h.prepareCodexOrphanDelegation(c, rawJSON)
 
 	// Check if the client requested a streaming response.
 	streamResult := gjson.GetBytes(rawJSON, "stream")
 	if streamResult.Type == gjson.True {
-		h.handleStreamingResponse(c, rawJSON)
+		h.handleStreamingResponse(c, rawJSON, replayRequestJSON)
 	} else {
-		h.handleNonStreamingResponse(c, rawJSON)
+		h.handleNonStreamingResponse(c, rawJSON, replayRequestJSON)
 	}
 
 }
@@ -704,7 +727,7 @@ func (h *OpenAIResponsesAPIHandler) Compact(c *gin.Context) {
 // Parameters:
 //   - c: The Gin context containing the HTTP request and response
 //   - rawJSON: The raw JSON bytes of the OpenAIResponses-compatible request
-func (h *OpenAIResponsesAPIHandler) handleNonStreamingResponse(c *gin.Context, rawJSON []byte) {
+func (h *OpenAIResponsesAPIHandler) handleNonStreamingResponse(c *gin.Context, rawJSON []byte, replayRequestJSON ...[]byte) {
 	c.Header("Content-Type", "application/json")
 
 	modelName := gjson.GetBytes(rawJSON, "model").String()
@@ -719,7 +742,10 @@ func (h *OpenAIResponsesAPIHandler) handleNonStreamingResponse(c *gin.Context, r
 		return
 	}
 	handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
-	_, _ = c.Writer.Write(resp)
+	n, errWrite := c.Writer.Write(resp)
+	if errWrite == nil && n == len(resp) && len(replayRequestJSON) > 0 {
+		rememberResponsesHTTPReplay(replayRequestJSON[0], resp)
+	}
 	cliCancel()
 }
 
@@ -730,7 +756,7 @@ func (h *OpenAIResponsesAPIHandler) handleNonStreamingResponse(c *gin.Context, r
 // Parameters:
 //   - c: The Gin context containing the HTTP request and response
 //   - rawJSON: The raw JSON bytes of the OpenAIResponses-compatible request
-func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJSON []byte) {
+func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJSON []byte, replayRequestJSON ...[]byte) {
 	// Get the http.Flusher interface to manually flush the response.
 	flusher, ok := c.Writer.(http.Flusher)
 	if !ok {
@@ -748,7 +774,9 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJ
 	deliveryCtx, finishDelivery := usage.WithStreamDelivery(context.Background())
 	defer finishDelivery(context.Canceled)
 	cliCtx, cancelExecution := h.GetContextWithCancel(h, c, deliveryCtx)
+	deliverySucceeded := false
 	cliCancel := func(err error) {
+		deliverySucceeded = err == nil
 		finishDelivery(err)
 		cancelExecution(err)
 	}
@@ -797,6 +825,11 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJ
 		failureEvent = "response.failed"
 	}
 	framer := &responsesSSEFramer{failureEvent: failureEvent, isCodexClient: isCodexClient, canComplete: func() bool { return usage.StreamDeliverySupported(cliCtx) }}
+	defer func() {
+		if deliverySucceeded && framer.terminalEvent == "response.completed" && framer.terminalError == nil && framer.writeErr == nil && len(replayRequestJSON) > 0 {
+			rememberResponsesHTTPReplayOutput(replayRequestJSON[0], framer.completedResponseID, framer.completedOutput)
+		}
+	}()
 	var initialOutput bytes.Buffer
 
 	// Peek at the first complete SSE data frame.
